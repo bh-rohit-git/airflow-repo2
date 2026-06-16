@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +47,31 @@ def run_spark_performance_analysis(
     application_id = ""
     if spark_history_server_url:
         client = SparkHistoryServerClient(spark_history_server_url)
-        application_id = client.resolve_application_id(preferred_ids=job.yarn_application_ids) or ""
-        if application_id:
-            snapshot = client.fetch_application_snapshot(application_id)
-            stages = snapshot.stages
-            metadata["spark_application_name"] = snapshot.name
-        else:
-            metadata["history_server_warning"] = "No Spark application matched in History Server"
+        try:
+            target = client.resolve_application_target(preferred_ids=job.yarn_application_ids)
+            if target:
+                application_id, attempt_id = target
+                metadata["spark_history_attempt_id"] = attempt_id
+                snapshot = client.fetch_application_snapshot(
+                    application_id,
+                    attempt_id=attempt_id,
+                )
+                stages = snapshot.stages
+                metadata["spark_application_name"] = snapshot.name
+                if not stages:
+                    metadata["history_server_warning"] = (
+                        "Spark application found but no stage metrics returned from History Server"
+                    )
+            else:
+                metadata["history_server_warning"] = "No Spark application matched in History Server"
+        except urllib.error.HTTPError as exc:
+            metadata["history_server_warning"] = (
+                f"Spark History Server HTTP {exc.code} at {spark_history_server_url}: {exc.reason}"
+            )
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+            metadata["history_server_warning"] = (
+                f"Spark History Server unreachable at {spark_history_server_url}: {exc}"
+            )
     else:
         metadata["history_server_warning"] = "spark_history_server_url not configured"
 
