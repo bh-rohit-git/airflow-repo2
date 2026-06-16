@@ -6,6 +6,9 @@
 # workflow_dispatch input:
 #   jar_file_uris — comma-separated GCS JAR URIs patched into params.jar_file_uris before sync
 #
+# Plugins sync uploads *_cluster_config.yml and plugins/dataproc_spark_performance/ from the repo.
+# config_dev.yml on Composer is not overwritten (provision separately per environment).
+#
 name: build-deploy-dags
 
 on:
@@ -102,3 +105,48 @@ jobs:
             --recursive
 
           echo "DAG sync completed successfully."
+
+      - name: Sync plugin cluster configs and dataproc_spark_performance to GCS
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.PLUGINS_DIR }}"
+          BUCKET="${{ env.GCS_BUCKET }}"
+          PREFIX="${{ env.GCS_PLUGINS_PREFIX }}"
+
+          BUCKET="${BUCKET#gs://}"
+          BUCKET="${BUCKET%/}"
+          PREFIX="${PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+          DEST_PREFIX="gs://${BUCKET}/${PREFIX}"
+
+          echo "Selective plugins sync from repo ${SOURCE}/ to ${DEST_PREFIX}/ (config_dev.yml is not modified)."
+
+          synced=0
+
+          shopt -s nullglob
+          cluster_configs=("$SOURCE"/*_cluster_config.yml "$SOURCE"/cluster_config.yml)
+          for config in "${cluster_configs[@]}"; do
+            if [ -f "$config" ]; then
+              name="$(basename "$config")"
+              echo "Uploading $name -> ${DEST_PREFIX}/$name"
+              gcloud storage cp "$config" "${DEST_PREFIX}/$name"
+              synced=1
+            fi
+          done
+
+          if [ -d "$SOURCE/dataproc_spark_performance" ]; then
+            echo "Syncing dataproc_spark_performance/ -> ${DEST_PREFIX}/dataproc_spark_performance/"
+            gcloud storage rsync "$SOURCE/dataproc_spark_performance" "${DEST_PREFIX}/dataproc_spark_performance" --recursive
+            synced=1
+          else
+            echo "Error: $SOURCE/dataproc_spark_performance is missing. Commit plugins/dataproc_spark_performance/ from migrate-repo output."
+            exit 1
+          fi
+
+          if [ "$synced" -eq 0 ]; then
+            echo "Error: no plugin artifacts found to sync under $SOURCE"
+            exit 1
+          fi
+
+          echo "Selective plugins sync completed successfully."
