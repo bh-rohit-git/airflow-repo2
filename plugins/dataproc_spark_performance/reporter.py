@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bh_migrate.dataproc.spark_performance.models import SparkPerformanceReport
+from .models import SparkPerformanceReport
 
 
 def write_spark_performance_report(report: SparkPerformanceReport, output_path: Path) -> Path:

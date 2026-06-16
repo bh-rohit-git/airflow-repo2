@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from bh_migrate.dataproc.spark_performance.models import SparkApplicationSnapshot, StageMetrics
+from .models import SparkApplicationSnapshot, StageMetrics
 
 
 class SparkHistoryServerClient:
