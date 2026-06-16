@@ -1,0 +1,104 @@
+# Sync Airflow DAGs and plugins to Composer GCS bucket via WIF
+#
+# GitHub Environment vars (optional overrides):
+#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET, JAR_FILE_URIS
+#
+# workflow_dispatch input:
+#   jar_file_uris — comma-separated GCS JAR URIs patched into params.jar_file_uris before sync
+#
+name: build-deploy-dags
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'GitHub Environment to use (loads env secrets/vars)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+        default: 'dev'
+      jar_file_uris:
+        description: 'Default JAR GCS URI(s), comma-separated'
+        required: true
+        type: string
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'nprd-bh-use1-dev' }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER || 'projects/609754835936/locations/global/workloadIdentityPools/dev-gh-actions-pool/providers/dev-ghactions-provider' }}
+  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'bh-dev-composer-cicd@nprd-bh-use1-dev.iam.gserviceaccount.com' }}
+  GCS_BUCKET: ${{ vars.GCS_BUCKET || 'us-east1-bh-d-composer-usea-754b7438-bucket' }}
+  JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS || 'gs://dev-bucket/jars/app-assembly.jar' }}
+  DAGS_DIR: dags
+  GCS_DAGS_PREFIX: dags
+  PLUGINS_DIR: plugins
+  GCS_PLUGINS_PREFIX: plugins
+
+jobs:
+  build-deploy-dags:
+    name: Sync DAGs and plugins to Composer GCS
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inject jar_file_uris defaults into migrated DAGs
+        env:
+          JAR_URIS: ${{ github.event.inputs.jar_file_uris || env.JAR_FILE_URIS }}
+          DAGS_DIR: ${{ env.DAGS_DIR }}
+        run: |
+          set -euo pipefail
+          if [ -z "$JAR_URIS" ]; then
+            echo "Error: jar_file_uris input and vars.JAR_FILE_URIS are both unset."
+            exit 1
+          fi
+          python3 .github/scripts/inject_jar_file_uris.py "$DAGS_DIR" "$JAR_URIS"
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Sync dags/ folder to GCS
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.DAGS_DIR }}"
+          BUCKET="${{ env.GCS_BUCKET }}"
+          PREFIX="${{ env.GCS_DAGS_PREFIX }}"
+
+          BUCKET="${BUCKET#gs://}"
+          BUCKET="${BUCKET%/}"
+          PREFIX="${PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory in this repository; nothing to sync."
+            exit 0
+          fi
+
+          if [ -z "$(find "$SOURCE" -type f | head -n 1)" ]; then
+            echo "Error: ${SOURCE}/ exists but contains no files."
+            exit 1
+          fi
+
+          DEST_URI="gs://${BUCKET}/${PREFIX}"
+          echo "Syncing '${SOURCE}/' to '${DEST_URI}/' (preserving folder structure)..."
+
+          gcloud storage rsync "$SOURCE" "$DEST_URI" \
+            --recursive
+
+          echo "DAG sync completed successfully."
