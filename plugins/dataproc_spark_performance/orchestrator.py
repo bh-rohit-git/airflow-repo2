@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .analyzer import analyze_stage_metrics
-from .dataproc_jobs import (
+from dataproc_spark_performance.analyzer import analyze_stage_metrics
+from dataproc_spark_performance.dataproc_jobs import (
     extract_dataproc_job_id,
     fetch_dataproc_job,
 )
-from .history_server import SparkHistoryServerClient
-from .models import SparkPerformanceReport
-from .reporter import write_spark_performance_report
+from dataproc_spark_performance.history_server import SparkHistoryServerClient
+from dataproc_spark_performance.models import SparkPerformanceReport
+from dataproc_spark_performance.reporter import write_spark_performance_report
 
 
 def run_spark_performance_analysis(

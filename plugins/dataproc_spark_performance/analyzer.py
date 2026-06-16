@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Iterable
 
-from .models import HotspotCategory, PerformanceFinding, StageMetrics
+from dataproc_spark_performance.models import HotspotCategory, PerformanceFinding, StageMetrics
 
 _SHUFFLE_WRITE_WARN_BYTES = 256 * 1024 * 1024
 _SPILL_WARN_BYTES = 1
