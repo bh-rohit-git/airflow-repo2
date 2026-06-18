@@ -39,7 +39,9 @@ def patch_migrated_dag(path: Path, uris: list[str]) -> bool:
 
 def patch_dags_dir(dags_dir: Path, uris: list[str]) -> list[Path]:
     updated: list[Path] = []
-    for path in sorted(dags_dir.rglob("*_migrated.py")):
+    for path in sorted(dags_dir.rglob("*.py")):
+        if "dualrun" in path.parts:
+            continue
         if patch_migrated_dag(path, uris):
             updated.append(path)
     return updated
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("dags_dir", type=Path, help="Directory containing migrated DAG modules")
     parser.add_argument(
         "jar_file_uris",
-        help="Comma-separated GCS URIs (for example gs://bucket/jars/app.jar)",
+        help="Comma-separated job JAR GCS URI(s)",
     )
     args = parser.parse_args(argv)
     if not args.dags_dir.is_dir():
@@ -72,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     if not updated:
-        print(f"No *_migrated.py files with jar_file_uris Param found under {args.dags_dir}")
+        print(f"No DAG files with jar_file_uris Param found under {args.dags_dir}")
         return 0
     for path in updated:
         print(f"Updated {path}")
