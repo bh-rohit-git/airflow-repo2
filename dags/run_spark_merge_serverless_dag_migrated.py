@@ -37,8 +37,41 @@ def _coerce_duration_proto(value, default=1800):
     return {"seconds": _duration_seconds_value(value, default)}
 
 
+_MISPLACED_GCE_METADATA_KEYS = frozenset(
+    {
+        "spark_listener_jar_uri",
+        "spark_metrics_output_prefix",
+        "performance_report_dir",
+        "task_telemetry_log_path",
+    }
+)
+
+
+def _strip_misplaced_gce_metadata(config):
+    gce = config.get("gce_cluster_config")
+    if not isinstance(gce, dict):
+        return config
+    metadata = gce.get("metadata")
+    if not isinstance(metadata, dict):
+        return config
+    stripped = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _MISPLACED_GCE_METADATA_KEYS
+    }
+    if stripped != metadata:
+        gce = dict(gce)
+        if stripped:
+            gce["metadata"] = stripped
+        else:
+            gce.pop("metadata", None)
+        config = dict(config)
+        config["gce_cluster_config"] = gce
+    return config
+
+
 def normalize_dataproc_cluster_config_types(config):
-    normalized = copy.deepcopy(config)
+    normalized = _strip_misplaced_gce_metadata(copy.deepcopy(config))
     for role in ("master_config", "worker_config"):
         section = normalized.get(role)
         if not isinstance(section, dict):
@@ -91,6 +124,17 @@ with _ENV_CONFIG_PATH.open(encoding="utf-8") as _env_config_file:
     _ENV_CONFIG = yaml.safe_load(_env_config_file)
 with _DAG_SIZING_PATH.open(encoding="utf-8") as _dag_sizing_file:
     _DAG_SIZING = yaml.safe_load(_dag_sizing_file)
+_gce_metadata = (
+    (_ENV_CONFIG.get("dataproc_cluster_config") or {}).get("gce_cluster_config") or {}
+).get("metadata") or {}
+for _cfg_key in (
+    "spark_listener_jar_uri",
+    "spark_metrics_output_prefix",
+    "performance_report_dir",
+    "task_telemetry_log_path",
+):
+    if _cfg_key not in _ENV_CONFIG and _cfg_key in _gce_metadata:
+        _ENV_CONFIG[_cfg_key] = _gce_metadata[_cfg_key]
 GCP_PROJECT_ID = _ENV_CONFIG["gcp_project_id"]
 GCP_REGION = _ENV_CONFIG["gcp_region"]
 DATABRICKS_HOST = _ENV_CONFIG.get("databricks_host", "")
