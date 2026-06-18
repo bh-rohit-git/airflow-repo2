@@ -7,64 +7,8 @@ from airflow.providers.google.cloud.operators.dataproc import (
 )
 from airflow.sdk import Param
 import copy
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-from airflow.operators.python import PythonOperator
-from dataproc_spark_performance import analyze_dataproc_spark_job
-
-
-def _dataproc_task_telemetry_log_path() -> str:
-    try:
-        return TASK_TELEMETRY_LOG_PATH
-    except NameError:
-        import os
-
-        return os.environ.get(
-            "DATAPROC_TASK_TELEMETRY_LOG",
-            "/home/airflow/gcs/logs/dataproc_task_telemetry.jsonl",
-        )
-
-
-def _dataproc_task_telemetry_write(
-    event: str, context, *, error: str | None = None
-) -> None:
-    ti = context["ti"]
-    dag_run = context.get("dag_run")
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event": event,
-        "dag_id": ti.dag_id,
-        "task_id": ti.task_id,
-        "run_id": getattr(dag_run, "run_id", None)
-        if dag_run
-        else context.get("run_id"),
-        "try_number": ti.try_number,
-    }
-    if error is not None:
-        record["error"] = error
-    path = Path(_dataproc_task_telemetry_log_path())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as log_file:
-        log_file.write(json.dumps(record, default=str) + "\n")
-
-
-def dataproc_task_telemetry_on_execute(context) -> None:
-    """Airflow ``on_execute_callback``: log task start."""
-    _dataproc_task_telemetry_write("task_start", context)
-
-
-def dataproc_task_telemetry_on_success(context) -> None:
-    """Airflow ``on_success_callback``: log task completion."""
-    _dataproc_task_telemetry_write("task_success", context)
-
-
-def dataproc_task_telemetry_on_failure(context) -> None:
-    """Airflow ``on_failure_callback``: log task failure."""
-    exc = context.get("exception")
-    _dataproc_task_telemetry_write(
-        "task_failure", context, error=str(exc) if exc is not None else None
-    )
+from airflow.providers.standard.operators.python import PythonOperator
+from dataproc_spark_metrics.orchestrator import run_collect_spark_metrics
 
 
 def _coerce_dataproc_int(value):
@@ -152,13 +96,6 @@ GCP_REGION = _ENV_CONFIG["gcp_region"]
 DATABRICKS_HOST = _ENV_CONFIG.get("databricks_host", "")
 DATABRICKS_TOKEN = _ENV_CONFIG.get("databricks_token", "")
 DATAPROC_CLUSTER_NAME = _DAG_SIZING["dataproc_cluster_name"]
-TASK_TELEMETRY_LOG_PATH = _ENV_CONFIG.get(
-    "task_telemetry_log_path", "/home/airflow/gcs/logs/dataproc_task_telemetry.jsonl"
-)
-SPARK_HISTORY_SERVER_URL = _ENV_CONFIG.get("spark_history_server_url")
-PERFORMANCE_REPORT_DIR = _ENV_CONFIG.get(
-    "performance_report_dir", "/home/airflow/gcs/logs/performance_reports"
-)
 _BASE_CLUSTER_CONFIG = normalize_dataproc_cluster_config_types(
     _ENV_CONFIG["dataproc_cluster_config"]
 )
@@ -173,14 +110,19 @@ DATAPROC_CLUSTER_CONFIG = {
     "master_config": _SIZING["master_config"],
     "worker_config": _SIZING["worker_config"],
 }
-default_args = {
-    "owner": "airflow",
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
-    "on_execute_callback": dataproc_task_telemetry_on_execute,
-    "on_success_callback": dataproc_task_telemetry_on_success,
-    "on_failure_callback": dataproc_task_telemetry_on_failure,
-}
+SPARK_LISTENER_JAR_URI = _ENV_CONFIG.get(
+    "spark_listener_jar_uri", "gs://YOUR_BUCKET/jars/plan-listener-assembly-1.0.jar"
+)
+SPARK_METRICS_OUTPUT_PREFIX = _ENV_CONFIG.get(
+    "spark_metrics_output_prefix", "gs://YOUR_BUCKET/spark-metrics/"
+)
+PERFORMANCE_REPORT_DIR = _ENV_CONFIG.get(
+    "performance_report_dir", "gs://YOUR_BUCKET/spark-reports/"
+)
+TASK_TELEMETRY_LOG_PATH = _ENV_CONFIG.get(
+    "task_telemetry_log_path", "gs://YOUR_BUCKET/telemetry/task_metrics.jsonl"
+)
+default_args = {"owner": "airflow", "retries": 1, "retry_delay": timedelta(minutes=5)}
 with DAG(
     dag_id="run_spark_merge_serverless_dag_migrated",
     default_args=default_args,
@@ -197,14 +139,41 @@ with DAG(
         ),
         "jar_file_uris": Param(
             default=[
-                "/Volumes/databricks-migrate-activity/schema1/jars/spark-merge-job-assembly.jar"
+                "/Volumes/databricks-migrate-activity/schema1/jars/spark-merge-job-assembly.jar",
+                "gs://YOUR_BUCKET/jars/plan-listener-assembly-1.0.jar",
             ],
             type="array",
-            description="JAR file URIs for the Dataproc Spark job",
+            description="JAR file URIs for the Dataproc Spark job (job JAR + listener JAR)",
+        ),
+        "spark_job_args": Param(
+            default=[
+                "--input-path",
+                "{{ dag_run.conf.get('input_path', params.input_path) }}",
+                "--target-table",
+                "databricks-migrate-activity.schema1.customer_events",
+                "--merge-key",
+                "id",
+            ],
+            type="array",
+            description="Spark job CLI args for the Dataproc submit task (override via dag_run.conf)",
         ),
     },
     render_template_as_native_obj=True,
 ) as dag:
+    create_cluster = TypedDataprocCreateClusterOperator(
+        task_id="create_cluster",
+        project_id=GCP_PROJECT_ID,
+        region=GCP_REGION,
+        cluster_name=DATAPROC_CLUSTER_NAME,
+        cluster_config=DATAPROC_CLUSTER_CONFIG,
+    )
+    delete_cluster = DataprocDeleteClusterOperator(
+        task_id="delete_cluster",
+        project_id=GCP_PROJECT_ID,
+        region=GCP_REGION,
+        cluster_name=DATAPROC_CLUSTER_NAME,
+        trigger_rule="all_done",
+    )
     run_spark_merge = DataprocSubmitJobOperator(
         task_id="run_spark_merge",
         project_id=GCP_PROJECT_ID,
@@ -214,16 +183,10 @@ with DAG(
             "spark_job": {
                 "main_class": "com.example.merge.Main",
                 "jar_file_uris": [
-                    "{{ (dag_run.conf.get('jar_file_uris') or params.jar_file_uris)[0] }}"
+                    "{{ (dag_run.conf.get('jar_file_uris') or params.jar_file_uris)[0] }}",
+                    "{{ (dag_run.conf.get('jar_file_uris') or params.jar_file_uris)[1] }}",
                 ],
-                "args": [
-                    "--input-path",
-                    "{{ dag_run.conf.get('input_path', params.input_path) }}",
-                    "--target-table",
-                    "databricks-migrate-activity.schema1.customer_events",
-                    "--merge-key",
-                    "id",
-                ],
+                "args": "{{ dag_run.conf.get('spark_job_args') or params.spark_job_args }}",
                 "properties": {
                     "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.1",
                     "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
@@ -231,36 +194,32 @@ with DAG(
                     "spark.submit.deployMode": "cluster",
                     "spark.yarn.appMasterEnv.DATABRICKS_HOST": DATABRICKS_HOST,
                     "spark.yarn.appMasterEnv.DATABRICKS_TOKEN": DATABRICKS_TOKEN,
+                    "spark.costanalyzer.outputDir": SPARK_METRICS_OUTPUT_PREFIX
+                    + "{{ dag.dag_id }}/{{ run_id }}/{{ ti.task_id }}/",
+                    "spark.sql.queryExecutionListeners": "ai.bighammer.spark.listener.SQLAndMetricsCaptureListener",
+                    "spark.openlineage.metrics.enabled": "true",
+                    "spark.sql.adaptive.enabled": "true",
+                    "spark.pipeline.id": "{{ dag.dag_id }}",
+                    "spark.flow.id": "{{ ti.task_id }}",
+                    "spark.pipeline.name": "{{ dag.dag_id }}",
                 },
             },
         },
     )
-create_cluster = TypedDataprocCreateClusterOperator(
-    task_id="create_cluster",
-    project_id=GCP_PROJECT_ID,
-    region=GCP_REGION,
-    cluster_name=DATAPROC_CLUSTER_NAME,
-    cluster_config=DATAPROC_CLUSTER_CONFIG,
-)
-analyze_spark_performance = PythonOperator(
-    task_id="analyze_spark_performance",
-    python_callable=analyze_dataproc_spark_job,
-    op_kwargs={
-        "upstream_spark_task_ids": ["run_spark_merge"],
-        "project_id": GCP_PROJECT_ID,
-        "region": GCP_REGION,
-        "cluster_name": DATAPROC_CLUSTER_NAME,
-        "spark_history_server_url": SPARK_HISTORY_SERVER_URL,
-        "performance_report_dir": PERFORMANCE_REPORT_DIR,
-    },
-)
-delete_cluster = DataprocDeleteClusterOperator(
-    task_id="delete_cluster",
-    project_id=GCP_PROJECT_ID,
-    region=GCP_REGION,
-    cluster_name=DATAPROC_CLUSTER_NAME,
-    trigger_rule="all_done",
-)
-create_cluster >> run_spark_merge
-run_spark_merge >> analyze_spark_performance
-analyze_spark_performance >> delete_cluster
+    collect_spark_metrics_run_spark_merge = PythonOperator(
+        task_id="collect_spark_metrics_run_spark_merge",
+        python_callable=run_collect_spark_metrics,
+        op_kwargs={
+            "metrics_output_dir": SPARK_METRICS_OUTPUT_PREFIX
+            + "{{ dag.dag_id }}/{{ run_id }}/run_spark_merge/",
+            "report_output_dir": PERFORMANCE_REPORT_DIR
+            + "{{ dag.dag_id }}/{{ run_id }}/",
+            "upstream_task_id": "run_spark_merge",
+            "dag_id": "{{ dag.dag_id }}",
+            "run_id": "{{ run_id }}",
+            "task_telemetry_log_path": TASK_TELEMETRY_LOG_PATH,
+        },
+    )
+    create_cluster >> run_spark_merge
+    run_spark_merge >> collect_spark_metrics_run_spark_merge
+    collect_spark_metrics_run_spark_merge >> delete_cluster
