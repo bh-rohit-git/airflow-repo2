@@ -183,8 +183,7 @@ with DAG(
         ),
         "jar_file_uris": Param(
             default=[
-                "/Volumes/databricks-migrate-activity/schema1/jars/spark-merge-job-assembly.jar",
-                "gs://YOUR_BUCKET/jars/plan-listener-assembly-1.0.jar",
+                "/Volumes/databricks-migrate-activity/schema1/jars/spark-merge-job-assembly.jar"
             ],
             type="array",
             description="JAR file URIs for the Dataproc Spark job (job JAR + listener JAR)",
@@ -228,7 +227,7 @@ with DAG(
                 "main_class": "com.example.merge.Main",
                 "jar_file_uris": [
                     "{{ (dag_run.conf.get('jar_file_uris') or params.jar_file_uris)[0] }}",
-                    "{{ (dag_run.conf.get('jar_file_uris') or params.jar_file_uris)[1] }}",
+                    SPARK_LISTENER_JAR_URI,
                 ],
                 "args": "{{ dag_run.conf.get('spark_job_args') or params.spark_job_args }}",
                 "properties": {
