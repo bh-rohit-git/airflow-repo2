@@ -1,13 +1,15 @@
 # Sync Airflow DAGs and plugins to Composer GCS bucket via WIF
 #
+# - rsync all files under dags/     -> gs://<composer-bucket>/dags/
+# - rsync all files under plugins/  -> gs://<composer-bucket>/plugins/
+# - upload dual-run scripts         -> /Volumes/<catalog>/<schema>/dualrun/ on Databricks
+#
 # GitHub Environment vars (optional overrides):
-#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET, JAR_FILE_URIS
+#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET
+#   DATABRICKS_HOST, DATABRICKS_UC_VOLUME_BASE
 #
-# workflow_dispatch input:
-#   jar_file_uris — comma-separated GCS JAR URIs patched into params.jar_file_uris before sync
-#
-# Plugins sync uploads *_cluster_config.yml and plugins/dataproc_spark_performance/ from the repo.
-# config_dev.yml on Composer is not overwritten (provision separately per environment).
+# GitHub Environment secret:
+#   DATABRICKS_TOKEN
 #
 name: build-deploy-dags
 
@@ -23,21 +25,19 @@ on:
           - qa
           - prod
         default: 'dev'
-      jar_file_uris:
-        description: 'Default JAR GCS URI(s), comma-separated'
-        required: true
-        type: string
 
 env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'nprd-bh-use1-dev' }}
   WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER || 'projects/609754835936/locations/global/workloadIdentityPools/dev-gh-actions-pool/providers/dev-ghactions-provider' }}
   GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'bh-dev-composer-cicd@nprd-bh-use1-dev.iam.gserviceaccount.com' }}
   GCS_BUCKET: ${{ vars.GCS_BUCKET || 'us-east1-bh-d-composer-usea-754b7438-bucket' }}
-  JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS || 'gs://dev-bucket/jars/app-assembly.jar' }}
   DAGS_DIR: dags
   GCS_DAGS_PREFIX: dags
   PLUGINS_DIR: plugins
   GCS_PLUGINS_PREFIX: plugins
+  DUALRUN_NOTEBOOKS_DIR: notebooks/dualrun
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  DATABRICKS_UC_VOLUME_BASE: ${{ vars.DATABRICKS_UC_VOLUME_BASE || '/Volumes/databricks-migrate-activity/schema1/dualrun' }}
 
 jobs:
   build-deploy-dags:
@@ -52,18 +52,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Inject jar_file_uris defaults into migrated DAGs
-        env:
-          JAR_URIS: ${{ github.event.inputs.jar_file_uris || env.JAR_FILE_URIS }}
-          DAGS_DIR: ${{ env.DAGS_DIR }}
-        run: |
-          set -euo pipefail
-          if [ -z "$JAR_URIS" ]; then
-            echo "Error: jar_file_uris input and vars.JAR_FILE_URIS are both unset."
-            exit 1
-          fi
-          python3 .github/scripts/inject_jar_file_uris.py "$DAGS_DIR" "$JAR_URIS"
-
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
         with:
@@ -75,7 +63,7 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Sync dags/ folder to GCS
+      - name: Rsync dags/ folder to Composer bucket
         run: |
           set -euo pipefail
 
@@ -98,15 +86,16 @@ jobs:
             exit 1
           fi
 
+          FILE_COUNT="$(find "$SOURCE" -type f | wc -l | tr -d ' ')"
           DEST_URI="gs://${BUCKET}/${PREFIX}"
-          echo "Syncing '${SOURCE}/' to '${DEST_URI}/' (preserving folder structure)..."
+          echo "Rsyncing all files from '${SOURCE}/' (${FILE_COUNT} file(s)) to '${DEST_URI}/'..."
 
           gcloud storage rsync "$SOURCE" "$DEST_URI" \
             --recursive
 
           echo "DAG sync completed successfully."
 
-      - name: Sync plugin cluster configs and dataproc_spark_performance to GCS
+      - name: Rsync plugins/ folder to Composer bucket
         run: |
           set -euo pipefail
 
@@ -118,35 +107,62 @@ jobs:
           BUCKET="${BUCKET%/}"
           PREFIX="${PREFIX#/}"
           PREFIX="${PREFIX%/}"
-          DEST_PREFIX="gs://${BUCKET}/${PREFIX}"
 
-          echo "Selective plugins sync from repo ${SOURCE}/ to ${DEST_PREFIX}/ (config_dev.yml is not modified)."
-
-          synced=0
-
-          shopt -s nullglob
-          cluster_configs=("$SOURCE"/*_cluster_config.yml "$SOURCE"/cluster_config.yml)
-          for config in "${cluster_configs[@]}"; do
-            if [ -f "$config" ]; then
-              name="$(basename "$config")"
-              echo "Uploading $name -> ${DEST_PREFIX}/$name"
-              gcloud storage cp "$config" "${DEST_PREFIX}/$name"
-              synced=1
-            fi
-          done
-
-          if [ -d "$SOURCE/dataproc_spark_performance" ]; then
-            echo "Syncing dataproc_spark_performance/ -> ${DEST_PREFIX}/dataproc_spark_performance/"
-            gcloud storage rsync "$SOURCE/dataproc_spark_performance" "${DEST_PREFIX}/dataproc_spark_performance" --recursive
-            synced=1
-          else
-            echo "Error: $SOURCE/dataproc_spark_performance is missing. Commit plugins/dataproc_spark_performance/ from migrate-repo output."
-            exit 1
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory in this repository; skipping plugins sync."
+            exit 0
           fi
 
-          if [ "$synced" -eq 0 ]; then
-            echo "Error: no plugin artifacts found to sync under $SOURCE"
-            exit 1
+          if [ -z "$(find "$SOURCE" -type f | head -n 1)" ]; then
+            echo "No files under ${SOURCE}/; skipping plugins sync."
+            exit 0
           fi
 
-          echo "Selective plugins sync completed successfully."
+          FILE_COUNT="$(find "$SOURCE" -type f | wc -l | tr -d ' ')"
+          DEST_URI="gs://${BUCKET}/${PREFIX}"
+          echo "Rsyncing all files from '${SOURCE}/' (${FILE_COUNT} file(s)) to '${DEST_URI}/'..."
+
+          gcloud storage rsync "$SOURCE" "$DEST_URI" \
+            --recursive
+
+          echo "Plugins sync completed successfully."
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@v0.272.0
+
+      - name: Upload dual-run scripts to UC Volume
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.DUALRUN_NOTEBOOKS_DIR }}"
+          DEST="${{ env.DATABRICKS_UC_VOLUME_BASE }}"
+
+          if [ -z "${DEST}" ]; then
+            echo "DATABRICKS_UC_VOLUME_BASE is not set; skipping dual-run UC Volume upload."
+            exit 0
+          fi
+
+          if [ -z "${{ env.DATABRICKS_HOST }}" ]; then
+            echo "DATABRICKS_HOST is not set; skipping dual-run UC Volume upload."
+            exit 0
+          fi
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory; skipping dual-run UC Volume upload."
+            exit 0
+          fi
+
+          if [ -z "$(find "$SOURCE" -type f -name '*.py' | head -n 1)" ]; then
+            echo "No dual-run .py scripts under ${SOURCE}/; skipping UC Volume upload."
+            exit 0
+          fi
+
+          FILE_COUNT="$(find "$SOURCE" -type f -name '*.py' | wc -l | tr -d ' ')"
+          echo "Uploading ${FILE_COUNT} dual-run script(s) from '${SOURCE}/' to '${DEST}/'..."
+
+          databricks fs cp "$SOURCE" "$DEST" --recursive --overwrite
+
+          echo "Dual-run UC Volume upload completed."
+          databricks fs ls "$DEST" --recursive | head -50 || true
