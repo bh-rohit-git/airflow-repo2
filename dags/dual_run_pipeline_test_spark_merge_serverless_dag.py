@@ -29,11 +29,11 @@ SOURCE_DAG_CONF = {
         "group_id": "com.example.merge.Main:97f8bbd025f5",
         "project_id": "workspace-migration",
         "target_overrides": {
-            "target-table": "databricks-migrate-activity.schema1.customer_events_dual_clone_1"
+            "target-table": "`databricks-migrate-activity`.schema1.customer_events_dual_clone_1"
         }
     },
-    "target-table": "databricks-migrate-activity.schema1.customer_events_dual_clone_1",
-    "target_table": "databricks-migrate-activity.schema1.customer_events_dual_clone_1"
+    "target-table": "`databricks-migrate-activity`.schema1.customer_events_dual_clone_1",
+    "target_table": "`databricks-migrate-activity`.schema1.customer_events_dual_clone_1"
 }
 MIGRATED_DAG_CONF = {
     "dual_run": {
@@ -85,7 +85,7 @@ with DAG(
     ensure_dualrun_clones = DatabricksSubmitRunOperator(
         task_id="ensure_dualrun_clones",
         databricks_conn_id=DATABRICKS_CONN_ID,
-        json=_serverless_pyspark_task("ensure_clones", "/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/ensure_clones.py"),
+        json=_serverless_pyspark_task("ensure_clones", "dbfs:/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/ensure_clones.py"),
     )
 
     trigger_source_dag = TriggerDagRunOperator(
@@ -107,7 +107,7 @@ with DAG(
         databricks_conn_id=DATABRICKS_CONN_ID,
         json=_serverless_pyspark_task(
             "compare_outputs",
-            "/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/compare_outputs.py",
+            "dbfs:/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/compare_outputs.py",
             ["--results-path", "dbfs:/tmp/dual_run/compare_results.json"],
         ),
     )
