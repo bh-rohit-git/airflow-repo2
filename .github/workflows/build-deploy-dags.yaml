@@ -3,7 +3,7 @@
 # - patch jar_file_uris in migrated DAGs from env / GitHub vars
 # - rsync all files under dags/     -> gs://<composer-bucket>/dags/
 # - rsync all files under plugins/  -> gs://<composer-bucket>/plugins/
-# - upload dual-run scripts         -> /Volumes/<catalog>/<schema>/dualrun/ on Databricks
+# - upload dual-run scripts         -> dbfs:/Volumes/<catalog>/<schema>/<volume>/{source_dag_id}/ on Databricks
 #
 # GitHub Environment vars (optional overrides):
 #   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET
@@ -12,7 +12,7 @@
 #   DATABRICKS_HOST, DATABRICKS_UC_VOLUME_BASE
 #
 # GitHub Environment secret:
-#   DATABRICKS_TOKEN
+#   DATABRICKS_TOKEN — PAT with API scopes: files, unity-catalog (required for fs cp to volumes)
 #
 name: build-deploy-dags
 
@@ -151,6 +151,8 @@ jobs:
 
       - name: Upload dual-run scripts to UC Volume
         env:
+          DATABRICKS_AUTH_TYPE: pat
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           set -euo pipefail
@@ -173,15 +175,31 @@ jobs:
             exit 0
           fi
 
-          if [ -z "$(find "$SOURCE" -type f -name '*.py' | head -n 1)" ]; then
-            echo "No dual-run .py scripts under ${SOURCE}/; skipping UC Volume upload."
+          # CLI requires dbfs:/Volumes/... for volume paths
+          case "$DEST" in
+            dbfs:*) ;;
+            /Volumes/*) DEST="dbfs:$DEST" ;;
+          esac
+
+          UPLOADED=0
+          for DAG_DIR in "$SOURCE"/*/; do
+            [ -d "$DAG_DIR" ] || continue
+            SOURCE_DAG_ID="$(basename "$DAG_DIR")"
+            if [ -z "$(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' | head -n 1)" ]; then
+              echo "No .py files under ${DAG_DIR}; skipping."
+              continue
+            fi
+            DEST_DIR="$DEST/$SOURCE_DAG_ID"
+            FILE_COUNT="$(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' | wc -l | tr -d ' ')"
+            echo "Uploading ${FILE_COUNT} dual-run script(s) from '${DAG_DIR}' to '${DEST_DIR}/'..."
+            databricks fs cp "$DAG_DIR" "$DEST_DIR" --recursive --overwrite
+            UPLOADED=$((UPLOADED + 1))
+          done
+
+          if [ "$UPLOADED" -eq 0 ]; then
+            echo "No dual-run source_dag_id subdirectories with .py files under ${SOURCE}/; skipping UC Volume upload."
             exit 0
           fi
 
-          FILE_COUNT="$(find "$SOURCE" -type f -name '*.py' | wc -l | tr -d ' ')"
-          echo "Uploading ${FILE_COUNT} dual-run script(s) from '${SOURCE}/' to '${DEST}/'..."
-
-          databricks fs cp "$SOURCE" "$DEST" --recursive --overwrite
-
-          echo "Dual-run UC Volume upload completed."
+          echo "Dual-run UC Volume upload completed (${UPLOADED} source_dag_id folder(s))."
           databricks fs ls "$DEST" --recursive | head -50 || true
