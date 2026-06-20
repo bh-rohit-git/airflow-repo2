@@ -42,7 +42,7 @@ env:
   DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
   GCS_JAR_PREFIX: ${{ vars.GCS_JAR_PREFIX || 'jars' }}
   JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS }}
-  VERSIONLESS_JAR_NAME: ${{{{ vars.VERSIONLESS_JAR_NAME }}}}
+  VERSIONLESS_JAR_NAME: ${{ vars.VERSIONLESS_JAR_NAME }}
   DATABRICKS_UC_VOLUME_BASE: ${{ vars.DATABRICKS_UC_VOLUME_BASE || '/Volumes/databricks-migrate-activity/schema1/dualrun' }}
   PATCH_JAR_SCRIPT: .github/patch_dag_jar_uris.py
 
