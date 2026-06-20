@@ -1,11 +1,14 @@
 # Sync Airflow DAGs and plugins to Composer GCS bucket via WIF
 #
+# - patch jar_file_uris in migrated DAGs from env / GitHub vars
 # - rsync all files under dags/     -> gs://<composer-bucket>/dags/
 # - rsync all files under plugins/  -> gs://<composer-bucket>/plugins/
 # - upload dual-run scripts         -> /Volumes/<catalog>/<schema>/dualrun/ on Databricks
 #
 # GitHub Environment vars (optional overrides):
 #   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET
+#   JAR_FILE_URIS — comma-separated or JSON array (e.g. gs://bucket/jars/app.jar)
+#   GCS_JAR_PREFIX, VERSIONLESS_JAR_NAME — used when JAR_FILE_URIS is unset
 #   DATABRICKS_HOST, DATABRICKS_UC_VOLUME_BASE
 #
 # GitHub Environment secret:
@@ -37,7 +40,11 @@ env:
   GCS_PLUGINS_PREFIX: plugins
   DUALRUN_NOTEBOOKS_DIR: notebooks/dualrun
   DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  GCS_JAR_PREFIX: ${{ vars.GCS_JAR_PREFIX || 'jars' }}
+  JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS }}
+  VERSIONLESS_JAR_NAME: ${{{{ vars.VERSIONLESS_JAR_NAME }}}}
   DATABRICKS_UC_VOLUME_BASE: ${{ vars.DATABRICKS_UC_VOLUME_BASE || '/Volumes/databricks-migrate-activity/schema1/dualrun' }}
+  PATCH_JAR_SCRIPT: .github/patch_dag_jar_uris.py
 
 jobs:
   build-deploy-dags:
@@ -62,6 +69,18 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Patch jar_file_uris in migrated DAGs
+        run: |
+          set -euo pipefail
+
+          SCRIPT="${{ env.PATCH_JAR_SCRIPT }}"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "No $SCRIPT in repository; skipping jar_file_uris patch."
+            exit 0
+          fi
+
+          python3 "$SCRIPT" --dags-dir "${{ env.DAGS_DIR }}"
 
       - name: Rsync dags/ folder to Composer bucket
         run: |
